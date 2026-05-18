@@ -65,3 +65,40 @@ input, textarea, select { font-family: inherit; }
 
 .msg-appear { animation: fadeIn 0.25s ease; }
 .tts-reading { box-shadow: 0 0 0 2px var(--accent); }
+
+/* ── MOBILE RESPONSIVE ── */
+@media (max-width: 768px) {
+  body { overflow: hidden; }
+
+  .sidebar-overlay {
+    display: block !important;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 99;
+  }
+
+  .sidebar-mobile {
+    position: fixed !important;
+    top: 0; left: 0; bottom: 0;
+    z-index: 100;
+    width: 280px !important;
+    transform: translateX(0) !important;
+  }
+
+  .sidebar-mobile.closed {
+    transform: translateX(-100%) !important;
+  }
+
+  .msg-bubble {
+    max-width: 90% !important;
+  }
+
+  .header-buttons span {
+    display: none;
+  }
+
+  .input-bar textarea {
+    font-size: 16px !important; /* prevents iOS zoom */
+  }
+}

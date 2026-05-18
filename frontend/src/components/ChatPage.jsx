@@ -85,7 +85,6 @@ const chunkText = (text, maxLen = 180) => {
 
 class TTSManager {
   constructor() { this.speaking = false; this._keepAlive = null; }
-
   async speak(text, lang = 'en', speed = 1.0, gender = 'female', onStart, onEnd) {
     this.stop();
     if (!window.speechSynthesis || !text) return 'ok';
@@ -119,10 +118,7 @@ class TTSManager {
     speakNext();
     return 'ok';
   }
-
-  stop() {
-    this.speaking = false; clearInterval(this._keepAlive); window.speechSynthesis?.cancel();
-  }
+  stop() { this.speaking = false; clearInterval(this._keepAlive); window.speechSynthesis?.cancel(); }
 }
 
 const ttsManager = new TTSManager();
@@ -159,7 +155,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
   const [copyFeedback, setCopyFeedback] = useState(null);
   const [rateLimitWarn, setRateLimitWarn] = useState(false);
   const [streamingIdx, setStreamingIdx] = useState(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showEnableAudio, setShowEnableAudio] = useState(false);
   const [pendingReadText, setPendingReadText] = useState(null);
   const [pendingReadIdx, setPendingReadIdx] = useState(null);
@@ -167,6 +163,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
   const [docFile, setDocFile] = useState(null);
   const [docPreview, setDocPreview] = useState('');
   const [docAnalyzing, setDocAnalyzing] = useState(false);
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const fileInputRef = useRef(null);
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
@@ -179,7 +176,19 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
   const language    = user.preferences?.language || 'en';
   const fontSize    = user.preferences?.fontSize || 15;
 
-  useEffect(() => { loadChatHistory(); }, []);
+  useEffect(() => {
+    loadChatHistory();
+    // On desktop, open sidebar by default
+    if (window.innerWidth > 768) setSidebarOpen(true);
+    const handleResize = () => {
+      const mobile = window.innerWidth <= 768;
+      setIsMobile(mobile);
+      if (!mobile) setSidebarOpen(true);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
 
   useEffect(() => {
@@ -203,6 +212,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
   const newChat = () => {
     ttsManager.stop(); setSpeaking(null);
     setMessages([]); setChatId(null); setChatTitle('New Chat');
+    if (isMobile) setSidebarOpen(false);
     inputRef.current?.focus();
   };
 
@@ -212,6 +222,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
       const { data } = await api.get(`/chat/${id}`);
       setMessages(data.messages.map(m => ({ role: m.role === 'assistant' ? 'bot' : m.role, text: m.content })));
       setChatId(id); setChatTitle(title);
+      if (isMobile) setSidebarOpen(false);
     } catch (e) { alert('Failed to load chat'); }
   };
 
@@ -307,7 +318,6 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
           if (result === 'no_voice') showNoVoiceToast();
         }, 400);
       }
-
     } catch (err) {
       setMessages(prev => [...prev, { role: 'bot', text: '❌ Error: ' + err.message }]);
       setStreamingIdx(null);
@@ -321,7 +331,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
   const handleFileSelect = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const allowed = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/jpeg', 'image/png', 'image/jpg'];
+    const allowed = ['application/pdf','application/vnd.openxmlformats-officedocument.wordprocessingml.document','image/jpeg','image/png','image/jpg'];
     if (!allowed.includes(file.type)) { alert('Only PDF, DOCX, JPG, and PNG files are supported.'); return; }
     if (file.size > 10 * 1024 * 1024) { alert('File too large. Maximum 10MB.'); return; }
     setDocFile(file); setDocPreview(file.name);
@@ -356,7 +366,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        setMessages(prev => { const n=[...prev]; n[n.length-1]={role:'bot',text:'❌ ' + (err.message || 'Could not analyze document')}; return n; });
+        setMessages(prev => { const n=[...prev]; n[n.length-1]={role:'bot',text:'❌ '+(err.message||'Could not analyze document')}; return n; });
         return;
       }
 
@@ -415,8 +425,8 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
     recognition.onresult = (e) => { setInput(prev => prev ? prev + ' ' + e.results[0][0].transcript : e.results[0][0].transcript); setMicActive(false); };
     recognition.onerror = (e) => {
       setMicActive(false);
-      if (e.error === 'not-allowed') setMicError('Mic blocked — click 🔒 in address bar and allow microphone.');
-      else if (e.error === 'no-speech') setMicError('No speech detected. Speak clearly and try again.');
+      if (e.error === 'not-allowed') setMicError('Mic blocked — allow microphone in browser settings.');
+      else if (e.error === 'no-speech') setMicError('No speech detected. Try again.');
       else setMicError('Mic error: ' + e.error);
     };
     recognition.onend = () => setMicActive(false);
@@ -427,12 +437,12 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
   const langNames = { hi:'Hindi', bn:'Bengali', mr:'Marathi', ta:'Tamil', te:'Telugu' };
   const showNoVoiceToast = () => {
     const name = langNames[language];
-    setTtsToast(`⚠️ Your device doesn't have a ${name} voice installed. Add it in your OS language/speech settings, or switch to English in NyayBot Settings.`);
+    setTtsToast(`⚠️ Your device doesn't have a ${name} voice installed. Add it in OS settings or switch to English.`);
     setTimeout(() => setTtsToast(''), 8000);
   };
 
   const toggleTTS = async (text, idx) => {
-    if (!window.speechSynthesis) { alert('TTS not supported in this browser. Use Chrome or Edge.'); return; }
+    if (!window.speechSynthesis) { alert('TTS not supported. Use Chrome or Edge.'); return; }
     if (speaking === idx) { ttsManager.stop(); setSpeaking(null); return; }
     if (!ttsEnabled) { setPendingReadText(text); setPendingReadIdx(idx); setShowEnableAudio(true); return; }
     const result = await ttsManager.speak(text, detectLang(text), ttsSpeed, ttsGender, () => setSpeaking(idx), () => setSpeaking(null));
@@ -467,26 +477,59 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
   const groups = groupedHistory();
 
   return (
-    <div style={{ display:'flex', height:'100vh', overflow:'hidden' }}>
+    <div style={{ display:'flex', height:'100vh', overflow:'hidden', position:'relative' }}>
+
       {showEnableAudio && (
         <EnableAudioModal onEnable={enableAudioNow}
           onClose={() => { setShowEnableAudio(false); setPendingReadText(null); setPendingReadIdx(null); }} />
       )}
 
+      {/* Mobile sidebar overlay */}
+      {isMobile && sidebarOpen && (
+        <div onClick={() => setSidebarOpen(false)}
+          style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:99 }} />
+      )}
+
       {/* SIDEBAR */}
-      <div style={{ width: sidebarOpen ? 260 : 0, background:'var(--card)', borderRight:'1px solid var(--border)', display:'flex', flexDirection:'column', flexShrink:0, overflow:'hidden', transition:'width .2s' }}>
-        <div style={{ padding:16, borderBottom:'1px solid var(--border)', minWidth:260 }}>
-          <div style={{ fontSize:20, fontWeight:700, color:'var(--accent)' }}>⚖️ NyayBot</div>
-          <button onClick={newChat} style={{ width:'100%', padding:10, background:'var(--accent)', color:'#fff', borderRadius:8, fontSize:14, fontWeight:500, marginTop:12, cursor:'pointer' }}>+ New Chat</button>
+      <div style={{
+        width: 260,
+        background:'var(--card)',
+        borderRight:'1px solid var(--border)',
+        display:'flex',
+        flexDirection:'column',
+        flexShrink:0,
+        overflow:'hidden',
+        transition:'transform .25s ease',
+        ...(isMobile ? {
+          position:'fixed', top:0, left:0, bottom:0, zIndex:100,
+          transform: sidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
+          width: 280,
+        } : {
+          transform: sidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
+          width: sidebarOpen ? 260 : 0,
+        })
+      }}>
+        <div style={{ padding:16, borderBottom:'1px solid var(--border)' }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+            <div style={{ fontSize:20, fontWeight:700, color:'var(--accent)' }}>⚖️ NyayBot</div>
+            {isMobile && (
+              <button onClick={() => setSidebarOpen(false)}
+                style={{ fontSize:20, color:'var(--text2)', padding:4 }}>✕</button>
+            )}
+          </div>
+          <button onClick={newChat}
+            style={{ width:'100%', padding:10, background:'var(--accent)', color:'#fff', borderRadius:8, fontSize:14, fontWeight:500, marginTop:12, cursor:'pointer' }}>
+            + New Chat
+          </button>
         </div>
-        <div style={{ flex:1, overflowY:'auto', padding:12, minWidth:260 }}>
+        <div style={{ flex:1, overflowY:'auto', padding:12 }}>
           {[['Today', groups.today], ['Yesterday', groups.yesterday], ['Older', groups.older]].map(([label, items]) =>
             items.length > 0 && (
               <div key={label} style={{ marginBottom:16 }}>
                 <div style={{ fontSize:11, color:'var(--text3)', fontWeight:600, textTransform:'uppercase', letterSpacing:.5, marginBottom:6, padding:'0 4px' }}>{label}</div>
                 {items.map(c => (
                   <div key={c._id} onClick={() => loadChat(c._id, c.title)}
-                    style={{ padding:'8px 10px', borderRadius:6, fontSize:13, color: chatId===c._id ? 'var(--accent)' : 'var(--text2)', background: chatId===c._id ? 'var(--card2)' : 'transparent', cursor:'pointer', marginBottom:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', transition:'.15s' }}>
+                    style={{ padding:'10px 10px', borderRadius:6, fontSize:13, color: chatId===c._id ? 'var(--accent)' : 'var(--text2)', background: chatId===c._id ? 'var(--card2)' : 'transparent', cursor:'pointer', marginBottom:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', transition:'.15s' }}>
                     💬 {c.title}
                   </div>
                 ))}
@@ -495,9 +538,9 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
           )}
           {chatHistory.length === 0 && <div style={{ fontSize:13, color:'var(--text3)', padding:8 }}>No chats yet.</div>}
         </div>
-        <div style={{ padding:14, borderTop:'1px solid var(--border)', minWidth:260 }}>
+        <div style={{ padding:14, borderTop:'1px solid var(--border)' }}>
           <div style={{ display:'flex', alignItems:'center', gap:10, padding:6 }}>
-            <div style={{ width:34, height:34, borderRadius:'50%', background:'var(--accent)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, fontWeight:700, color:'#fff', flexShrink:0, overflow:'hidden' }}>
+            <div style={{ width:36, height:36, borderRadius:'50%', background:'var(--accent)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:14, fontWeight:700, color:'#fff', flexShrink:0, overflow:'hidden' }}>
               {user.profilePhoto ? <img src={user.profilePhoto} alt="avatar" style={{ width:'100%', height:'100%', objectFit:'cover' }} /> : user.name?.[0]?.toUpperCase()}
             </div>
             <div style={{ overflow:'hidden' }}>
@@ -506,54 +549,68 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
             </div>
           </div>
           <div style={{ display:'flex', gap:6, marginTop:8 }}>
-            <button onClick={onOpenSettings} style={{ flex:1, padding:'6px 10px', border:'1px solid var(--border)', borderRadius:6, fontSize:12, color:'var(--text2)', cursor:'pointer' }}>⚙ Settings</button>
-            <button onClick={onLogout} style={{ padding:'6px 10px', border:'1px solid var(--border)', borderRadius:6, fontSize:12, color:'var(--text2)', cursor:'pointer' }}>↩</button>
+            <button onClick={onOpenSettings} style={{ flex:1, padding:'8px 10px', border:'1px solid var(--border)', borderRadius:6, fontSize:13, color:'var(--text2)', cursor:'pointer' }}>⚙ Settings</button>
+            <button onClick={onLogout} style={{ padding:'8px 10px', border:'1px solid var(--border)', borderRadius:6, fontSize:13, color:'var(--text2)', cursor:'pointer' }}>↩</button>
           </div>
         </div>
       </div>
 
       {/* MAIN CHAT */}
-      <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
-        <div style={{ padding:'12px 16px', borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'space-between', background:'var(--card)', gap:8 }}>
-          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-            <button onClick={() => setSidebarOpen(o => !o)} style={{ width:30, height:30, borderRadius:6, border:'1px solid var(--border)', color:'var(--text2)', fontSize:16, cursor:'pointer' }}>☰</button>
-            <div style={{ fontSize:14, fontWeight:600, maxWidth:300, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{chatTitle}</div>
+      <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden', minWidth:0 }}>
+
+        {/* Header */}
+        <div style={{ padding:'10px 12px', borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'space-between', background:'var(--card)', gap:8, flexShrink:0 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:8, minWidth:0 }}>
+            <button onClick={() => setSidebarOpen(o => !o)}
+              style={{ width:36, height:36, borderRadius:8, border:'1px solid var(--border)', color:'var(--text2)', fontSize:18, cursor:'pointer', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
+              ☰
+            </button>
+            <div style={{ fontSize:14, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{chatTitle}</div>
           </div>
           <div style={{ display:'flex', gap:6, alignItems:'center', flexShrink:0 }}>
-            <button onClick={toggleAudioHeader} title={ttsEnabled ? 'Audio ON' : 'Audio OFF'}
-              style={{ padding:'5px 12px', borderRadius:20, fontSize:12, cursor:'pointer', border:`1px solid ${ttsEnabled ? 'var(--accent)' : 'var(--border)'}`, color: ttsEnabled ? 'var(--accent)' : 'var(--text3)', background: ttsEnabled ? 'rgba(0,201,167,0.08)' : 'none', fontWeight: ttsEnabled ? 600 : 400, transition:'all .2s' }}>
-              {ttsEnabled ? '🔊 Audio ON' : '🔇 Audio OFF'}
+            <button onClick={toggleAudioHeader}
+              style={{ padding:'5px 10px', borderRadius:20, fontSize:12, cursor:'pointer', border:`1px solid ${ttsEnabled ? 'var(--accent)' : 'var(--border)'}`, color: ttsEnabled ? 'var(--accent)' : 'var(--text3)', background: ttsEnabled ? 'rgba(0,201,167,0.08)' : 'none', fontWeight: ttsEnabled ? 600 : 400, whiteSpace:'nowrap' }}>
+              {ttsEnabled ? '🔊' : '🔇'}{!isMobile && (ttsEnabled ? ' ON' : ' OFF')}
             </button>
-            <button onClick={() => setShowEmergency(e => !e)} style={{ padding:'5px 12px', border:'1px solid var(--danger)', borderRadius:20, fontSize:12, color:'var(--danger)', fontWeight:500, cursor:'pointer' }}>🆘 Emergency</button>
-            <button onClick={onToggleTheme} style={{ padding:'5px 12px', border:'1px solid var(--border)', borderRadius:20, fontSize:12, color:'var(--text2)', cursor:'pointer' }}>{theme === 'dark' ? '☀' : '🌙'}</button>
+            <button onClick={() => setShowEmergency(e => !e)}
+              style={{ padding:'5px 10px', border:'1px solid var(--danger)', borderRadius:20, fontSize:12, color:'var(--danger)', fontWeight:500, cursor:'pointer', whiteSpace:'nowrap' }}>
+              🆘{!isMobile && ' Emergency'}
+            </button>
+            <button onClick={onToggleTheme}
+              style={{ padding:'5px 10px', border:'1px solid var(--border)', borderRadius:20, fontSize:12, color:'var(--text2)', cursor:'pointer' }}>
+              {theme === 'dark' ? '☀' : '🌙'}
+            </button>
           </div>
         </div>
 
+        {/* Toasts */}
         {ttsToast && (
-          <div style={{ background:'rgba(255,180,0,.1)', border:'1px solid #c8a000', borderRadius:8, margin:'8px 16px', padding:'8px 14px', fontSize:13, color:'#c8a000', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-            {ttsToast}
-            <button onClick={() => setTtsToast('')} style={{ color:'#c8a000', fontSize:16, cursor:'pointer', marginLeft:8 }}>×</button>
+          <div style={{ background:'rgba(255,180,0,.1)', border:'1px solid #c8a000', borderRadius:8, margin:'8px 12px', padding:'8px 12px', fontSize:13, color:'#c8a000', display:'flex', justifyContent:'space-between', alignItems:'center', gap:8 }}>
+            <span>{ttsToast}</span>
+            <button onClick={() => setTtsToast('')} style={{ color:'#c8a000', fontSize:18, cursor:'pointer', flexShrink:0 }}>×</button>
           </div>
         )}
         {micError && (
-          <div style={{ background:'rgba(224,92,92,.1)', border:'1px solid var(--danger)', borderRadius:8, margin:'8px 16px', padding:'8px 14px', fontSize:13, color:'var(--danger)', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-            🎙 {micError}
-            <button onClick={() => setMicError('')} style={{ color:'var(--danger)', fontSize:16, cursor:'pointer' }}>×</button>
+          <div style={{ background:'rgba(224,92,92,.1)', border:'1px solid var(--danger)', borderRadius:8, margin:'8px 12px', padding:'8px 12px', fontSize:13, color:'var(--danger)', display:'flex', justifyContent:'space-between', alignItems:'center', gap:8 }}>
+            <span>🎙 {micError}</span>
+            <button onClick={() => setMicError('')} style={{ color:'var(--danger)', fontSize:18, cursor:'pointer', flexShrink:0 }}>×</button>
           </div>
         )}
         {rateLimitWarn && (
-          <div style={{ background:'rgba(224,92,92,.1)', border:'1px solid var(--danger)', borderRadius:8, margin:'8px 16px', padding:'8px 14px', fontSize:13, color:'var(--danger)', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-            ⚠️ Rate limit reached — wait a moment before sending again.
-            <button onClick={() => setRateLimitWarn(false)} style={{ color:'var(--danger)', fontSize:16, cursor:'pointer' }}>×</button>
+          <div style={{ background:'rgba(224,92,92,.1)', border:'1px solid var(--danger)', borderRadius:8, margin:'8px 12px', padding:'8px 12px', fontSize:13, color:'var(--danger)', display:'flex', justifyContent:'space-between', alignItems:'center', gap:8 }}>
+            <span>⚠️ Rate limit reached — wait before sending again.</span>
+            <button onClick={() => setRateLimitWarn(false)} style={{ color:'var(--danger)', fontSize:18, cursor:'pointer', flexShrink:0 }}>×</button>
           </div>
         )}
+
+        {/* Emergency panel */}
         {showEmergency && (
-          <div style={{ background:'var(--card2)', borderBottom:'1px solid var(--border)', padding:'12px 16px' }}>
+          <div style={{ background:'var(--card2)', borderBottom:'1px solid var(--border)', padding:'12px' }}>
             <div style={{ fontSize:13, fontWeight:600, color:'var(--danger)', marginBottom:10 }}>🆘 Emergency Helplines (India)</div>
             <div style={{ display:'flex', flexWrap:'wrap', gap:8 }}>
               {EMERGENCY.map(e => (
                 <a key={e.number} href={`tel:${e.number}`}
-                  style={{ display:'flex', alignItems:'center', gap:6, padding:'6px 12px', background:'var(--card)', border:'1px solid var(--border)', borderRadius:8, fontSize:12, color:'var(--text)', textDecoration:'none' }}>
+                  style={{ display:'flex', alignItems:'center', gap:6, padding:'8px 12px', background:'var(--card)', border:'1px solid var(--border)', borderRadius:8, fontSize:12, color:'var(--text)', textDecoration:'none' }}>
                   <span>{e.icon}</span>
                   <div><div style={{ fontWeight:500 }}>{e.name}</div><div style={{ color:'var(--accent)', fontWeight:700 }}>{e.number}</div></div>
                 </a>
@@ -562,10 +619,11 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
           </div>
         )}
 
-        <div style={{ flex:1, overflowY:'auto', padding:'20px 16px', display:'flex', flexDirection:'column', gap:14, fontSize }}>
+        {/* Messages */}
+        <div style={{ flex:1, overflowY:'auto', padding:'16px 12px', display:'flex', flexDirection:'column', gap:14, fontSize }}>
           {messages.length === 0 && (
             <>
-              <div style={{ background:'var(--bot-bubble)', borderRadius:12, padding:20, maxWidth:680 }} className="msg-appear">
+              <div style={{ background:'var(--bot-bubble)', borderRadius:12, padding:18, maxWidth:680 }} className="msg-appear">
                 <div style={{ fontSize:16, fontWeight:600, color:'var(--accent)', marginBottom:8 }}>नमस्ते! I am NyayBot 🙏</div>
                 <div style={{ fontSize:14, color:'var(--text2)', lineHeight:1.6 }}>
                   I help you understand Indian laws and your legal rights. Ask me about IPC sections, RTI, consumer rights, domestic violence laws, labour law, property rights, family law, or cyber crime.
@@ -574,7 +632,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
               <div style={{ display:'flex', flexWrap:'wrap', gap:8 }}>
                 {CHIPS.map(c => (
                   <button key={c.label} onClick={() => sendMessage(c.text)}
-                    style={{ padding:'7px 14px', background:'var(--card2)', border:'1px solid var(--border)', borderRadius:20, fontSize:13, color:'var(--text2)', cursor:'pointer' }}>
+                    style={{ padding:'8px 14px', background:'var(--card2)', border:'1px solid var(--border)', borderRadius:20, fontSize:13, color:'var(--text2)', cursor:'pointer' }}>
                     {c.label}
                   </button>
                 ))}
@@ -588,28 +646,44 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
             const followUps = isBot && !m.streaming ? getFollowUps(m.text) : [];
             return (
               <div key={i} className="msg-appear" style={{ display:'flex', flexDirection:'column', alignItems: isBot ? 'flex-start' : 'flex-end', gap:4 }}>
-                <div style={{ maxWidth:'78%', padding:'11px 15px', borderRadius:12, lineHeight:1.65, background: isBot ? 'var(--bot-bubble)' : 'var(--user-bubble)', color: isBot ? 'var(--text)' : '#fff', borderBottomRightRadius: !isBot ? 3 : 12, borderBottomLeftRadius: isBot ? 3 : 12, whiteSpace:'pre-wrap', wordBreak:'break-word', boxShadow: isSpeaking ? '0 0 0 2px var(--accent)' : 'none', transition:'box-shadow .2s' }}>
+                <div style={{
+                  maxWidth: isMobile ? '92%' : '78%',
+                  padding:'11px 14px', borderRadius:12, lineHeight:1.65,
+                  background: isBot ? 'var(--bot-bubble)' : 'var(--user-bubble)',
+                  color: isBot ? 'var(--text)' : '#fff',
+                  borderBottomRightRadius: !isBot ? 3 : 12,
+                  borderBottomLeftRadius: isBot ? 3 : 12,
+                  whiteSpace:'pre-wrap', wordBreak:'break-word',
+                  boxShadow: isSpeaking ? '0 0 0 2px var(--accent)' : 'none',
+                  transition:'box-shadow .2s',
+                }}>
                   {m.text}
                   {m.streaming && <span style={{ animation:'pulse 1s infinite', marginLeft:4 }}>▋</span>}
                 </div>
+
                 {isBot && !m.streaming && m.text && (
                   <div style={{ display:'flex', gap:4, padding:'0 2px', flexWrap:'wrap' }}>
-                    <button onClick={() => copyMessage(m.text, i)} style={{ padding:'3px 8px', borderRadius:5, border:'1px solid var(--border)', fontSize:11, color:'var(--text3)', background:'var(--card2)', cursor:'pointer' }}>
+                    <button onClick={() => copyMessage(m.text, i)}
+                      style={{ padding:'4px 10px', borderRadius:5, border:'1px solid var(--border)', fontSize:12, color:'var(--text3)', background:'var(--card2)', cursor:'pointer' }}>
                       {copyFeedback === i ? '✅ Copied' : '📋 Copy'}
                     </button>
-                    <button onClick={() => bookmarkMessage(m.text, i)} style={{ padding:'3px 8px', borderRadius:5, border:'1px solid var(--border)', fontSize:11, color:'var(--text3)', background:'var(--card2)', cursor:'pointer' }}>
+                    <button onClick={() => bookmarkMessage(m.text, i)}
+                      style={{ padding:'4px 10px', borderRadius:5, border:'1px solid var(--border)', fontSize:12, color:'var(--text3)', background:'var(--card2)', cursor:'pointer' }}>
                       {copyFeedback === 'bm_'+i ? '✅ Saved' : '🔖 Save'}
                     </button>
-                    <button onClick={() => toggleTTS(m.text, i)} style={{ padding:'3px 8px', borderRadius:5, fontSize:11, cursor:'pointer', border:`1px solid ${isSpeaking ? 'var(--accent)' : 'var(--border)'}`, color: isSpeaking ? 'var(--accent)' : 'var(--text3)', background:'var(--card2)', fontWeight: isSpeaking ? 600 : 400 }}>
+                    <button onClick={() => toggleTTS(m.text, i)}
+                      style={{ padding:'4px 10px', borderRadius:5, fontSize:12, cursor:'pointer', border:`1px solid ${isSpeaking ? 'var(--accent)' : 'var(--border)'}`, color: isSpeaking ? 'var(--accent)' : 'var(--text3)', background:'var(--card2)', fontWeight: isSpeaking ? 600 : 400 }}>
                       {isSpeaking ? '⏹ Stop' : '🔊 Read'}
                     </button>
-                    <div style={{ fontSize:11, color:'var(--text3)', padding:'3px 4px', alignSelf:'center' }}>General info — not legal advice</div>
+                    {!isMobile && <div style={{ fontSize:11, color:'var(--text3)', padding:'4px', alignSelf:'center' }}>General info — not legal advice</div>}
                   </div>
                 )}
+
                 {followUps.length > 0 && i === messages.length - 1 && (
                   <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginTop:4 }}>
                     {followUps.map(f => (
-                      <button key={f} onClick={() => sendMessage(f)} style={{ padding:'5px 12px', background:'var(--card2)', border:'1px solid var(--border)', borderRadius:16, fontSize:12, color:'var(--text2)', cursor:'pointer' }}>
+                      <button key={f} onClick={() => sendMessage(f)}
+                        style={{ padding:'6px 12px', background:'var(--card2)', border:'1px solid var(--border)', borderRadius:16, fontSize:12, color:'var(--text2)', cursor:'pointer' }}>
                         {f}
                       </button>
                     ))}
@@ -629,40 +703,44 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
           <div ref={bottomRef} />
         </div>
 
-        <div style={{ padding:'14px 16px', borderTop:'1px solid var(--border)', background:'var(--card)' }}>
+        {/* Input */}
+        <div style={{ padding:'10px 12px', borderTop:'1px solid var(--border)', background:'var(--card)', flexShrink:0 }}>
           {docPreview && (
             <div style={{ display:'flex', alignItems:'center', gap:8, background:'var(--card2)', border:'1px solid var(--border)', borderRadius:8, padding:'6px 12px', marginBottom:8, fontSize:13 }}>
               <span>📎</span>
               <span style={{ flex:1, color:'var(--text2)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{docPreview}</span>
-              <button onClick={analyzeDocument} disabled={docAnalyzing || loading} style={{ padding:'4px 12px', borderRadius:6, border:'none', background:'var(--accent)', color:'#fff', fontSize:12, fontWeight:600, cursor:'pointer', opacity:(docAnalyzing||loading)?.5:1 }}>
+              <button onClick={analyzeDocument} disabled={docAnalyzing || loading}
+                style={{ padding:'5px 12px', borderRadius:6, border:'none', background:'var(--accent)', color:'#fff', fontSize:12, fontWeight:600, cursor:'pointer', opacity:(docAnalyzing||loading)?0.5:1, flexShrink:0 }}>
                 {docAnalyzing ? 'Analyzing…' : 'Analyze'}
               </button>
-              <button onClick={clearDoc} style={{ background:'none', border:'none', color:'var(--text3)', fontSize:16, cursor:'pointer', lineHeight:1 }}>×</button>
+              <button onClick={clearDoc} style={{ background:'none', border:'none', color:'var(--text3)', fontSize:18, cursor:'pointer', lineHeight:1, flexShrink:0 }}>×</button>
             </div>
           )}
           <input ref={fileInputRef} type="file" accept=".pdf,.docx,.jpg,.jpeg,.png" onChange={handleFileSelect} style={{ display:'none' }} />
-          <div style={{ display:'flex', alignItems:'flex-end', gap:8, background:'var(--card2)', border:'1px solid var(--border)', borderRadius:12, padding:'10px 12px' }}>
-            <button onClick={() => fileInputRef.current?.click()} title="Attach document (PDF, DOCX, Image)"
-              style={{ width:32, height:32, borderRadius:7, border:'1px solid var(--border)', color:'var(--text2)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, fontSize:16, background:'none', cursor:'pointer' }}>
+          <div style={{ display:'flex', alignItems:'flex-end', gap:8, background:'var(--card2)', border:'1px solid var(--border)', borderRadius:12, padding:'8px 10px' }}>
+            <button onClick={() => fileInputRef.current?.click()} title="Attach document"
+              style={{ width:36, height:36, borderRadius:8, border:'1px solid var(--border)', color:'var(--text2)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, fontSize:18, background:'none', cursor:'pointer' }}>
               📎
             </button>
             <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKey}
-              placeholder="Ask about any Indian law, right, or legal procedure..."
-              rows={1} style={{ flex:1, background:'none', border:'none', color:'var(--text)', fontSize:14, resize:'none', outline:'none', maxHeight:120, lineHeight:1.5 }}
+              placeholder="Ask about any Indian law..."
+              rows={1} style={{ flex:1, background:'none', border:'none', color:'var(--text)', fontSize: isMobile ? 16 : 14, resize:'none', outline:'none', maxHeight:120, lineHeight:1.5, padding:'4px 0' }}
               onInput={e => { e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,120)+'px'; }}
             />
-            <button onClick={toggleMic} title={micActive ? 'Stop recording' : 'Voice input'}
-              style={{ width:32, height:32, borderRadius:7, border:`1px solid ${micActive?'var(--danger)':'var(--border)'}`, color: micActive?'var(--danger)':'var(--text2)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, fontSize:15, background: micActive ? 'rgba(224,92,92,.1)' : 'none', cursor:'pointer' }}>
+            <button onClick={toggleMic} title={micActive ? 'Stop' : 'Voice input'}
+              style={{ width:36, height:36, borderRadius:8, border:`1px solid ${micActive?'var(--danger)':'var(--border)'}`, color: micActive?'var(--danger)':'var(--text2)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, fontSize:18, background: micActive ? 'rgba(224,92,92,.1)' : 'none', cursor:'pointer' }}>
               {micActive ? '⏹' : '🎙'}
             </button>
             <button onClick={() => sendMessage()} disabled={!input.trim() || loading}
-              style={{ width:32, height:32, borderRadius:7, background:'var(--accent)', color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, opacity:(!input.trim()||loading)?.4:1, fontSize:14, cursor:'pointer' }}>
+              style={{ width:36, height:36, borderRadius:8, background:'var(--accent)', color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, opacity:(!input.trim()||loading)?0.4:1, fontSize:16, cursor:'pointer' }}>
               ➤
             </button>
           </div>
-          <div style={{ fontSize:11, color:'var(--text3)', textAlign:'center', marginTop:6 }}>
-            NyayBot provides general legal information only — consult a lawyer for your situation
-          </div>
+          {!isMobile && (
+            <div style={{ fontSize:11, color:'var(--text3)', textAlign:'center', marginTop:6 }}>
+              NyayBot provides general legal information only — consult a lawyer for your situation
+            </div>
+          )}
         </div>
       </div>
     </div>
