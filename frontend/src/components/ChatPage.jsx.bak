@@ -1,0 +1,587 @@
+import { useState, useRef, useEffect } from 'react';
+import api from '../api';
+
+const CHIPS = [
+  { label: '📄 RTI Filing', text: 'What is the RTI Act and how do I file an RTI application?' },
+  { label: '⚖️ Section 498A', text: 'Explain Section 498A of the Indian Penal Code' },
+  { label: '📋 File an FIR', text: 'How do I file an FIR? What is the procedure?' },
+  { label: '🛒 Consumer Rights', text: 'What are my rights under the Consumer Protection Act 2019?' },
+  { label: '🔒 POCSO Act', text: 'What is the POCSO Act and what does it cover?' },
+  { label: '🏠 Tenant Rights', text: 'What are my rights as a tenant under Indian law?' },
+];
+
+const FOLLOWUP_MAP = {
+  rti: ['Who can file RTI?', 'What is the RTI fee?', 'Appeal process for RTI'],
+  fir: ['Can police refuse FIR?', 'What is a Zero FIR?', 'FIR vs complaint'],
+  '498a': ['Is 498A bailable?', 'Can 498A be quashed?', 'Anticipatory bail in 498A'],
+  consumer: ['Consumer court fees', 'Time limit to file complaint', 'What is district forum?'],
+  pocso: ['Mandatory reporting in POCSO', 'POCSO bail conditions', 'Special courts for POCSO'],
+  tenant: ['Notice period for eviction', 'Rent control laws', 'Can landlord enter without notice?'],
+};
+
+const EMERGENCY = [
+  { name: 'National Emergency', number: '112', icon: '🚨' },
+  { name: 'Police', number: '100', icon: '👮' },
+  { name: 'Women Helpline', number: '1091', icon: '👩' },
+  { name: 'Child Helpline', number: '1098', icon: '🧒' },
+  { name: 'Legal Aid', number: '15100', icon: '⚖️' },
+  { name: 'Domestic Violence', number: '181', icon: '🏠' },
+  { name: 'Cyber Crime', number: '1930', icon: '💻' },
+  { name: 'Senior Citizen', number: '14567', icon: '👴' },
+];
+
+// ─── TTS MANAGER ─────────────────────────────────────────────────────────────
+
+// Fix 1: Wait for Chrome to load voices asynchronously
+const getVoicesReady = () => new Promise((resolve) => {
+  const synth = window.speechSynthesis;
+  if (!synth) return resolve([]);
+  const v = synth.getVoices();
+  if (v.length > 0) return resolve(v);
+  const handler = () => { resolve(synth.getVoices()); synth.removeEventListener('voiceschanged', handler); };
+  synth.addEventListener('voiceschanged', handler);
+  setTimeout(() => resolve(synth.getVoices()), 2000);
+});
+
+const pickVoice = (voices, langCode, gender) => {
+  const target = { en:'en', hi:'hi', bn:'bn', mr:'mr', ta:'ta', te:'te' }[langCode] || 'en';
+  let filtered = voices.filter(v => v.lang.toLowerCase().startsWith(target));
+  if (!filtered.length) filtered = voices.filter(v => v.lang.toLowerCase().startsWith('en'));
+  if (!filtered.length) filtered = [...voices];
+  const preferred = filtered.find(v =>
+    gender === 'female'
+      ? /female|woman|zira|hazel|susan|heera|kalpana/i.test(v.name)
+      : /male|man|david|mark|ravi|hemant/i.test(v.name)
+  );
+  return preferred || filtered[0] || null;
+};
+
+// Fix 2: Chrome silently stops after ~200 chars — chunk text into sentences
+const chunkText = (text, maxLen = 180) => {
+  const sentences = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
+  const chunks = [];
+  let current = '';
+  for (const s of sentences) {
+    if ((current + s).length > maxLen && current.length > 0) {
+      chunks.push(current.trim());
+      current = s;
+    } else {
+      current += s;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+};
+
+class TTSManager {
+  constructor() { this.speaking = false; this._keepAlive = null; }
+
+  async speak(text, lang = 'en', speed = 1.0, gender = 'female', onStart, onEnd) {
+    this.stop();
+    if (!window.speechSynthesis || !text) return;
+
+    const voices = await getVoicesReady();
+    const langBCP = { en:'en-IN', hi:'hi-IN', bn:'bn-IN', mr:'mr-IN', ta:'ta-IN', te:'te-IN' };
+    const voice = pickVoice(voices, lang, gender);
+    const chunks = chunkText(text);
+    if (!chunks.length) return;
+
+    this.speaking = true;
+    onStart?.();
+
+    let i = 0;
+    const speakNext = () => {
+      if (i >= chunks.length || !this.speaking) {
+        this.speaking = false;
+        clearInterval(this._keepAlive);
+        onEnd?.();
+        return;
+      }
+      const u = new SpeechSynthesisUtterance(chunks[i]);
+      u.lang = langBCP[lang] || 'en-IN';
+      u.rate = Math.min(Math.max(speed, 0.5), 2.0);
+      if (voice) u.voice = voice;
+      u.onend = () => { i++; speakNext(); };
+      u.onerror = (e) => {
+        if (e.error !== 'interrupted') console.warn('TTS error:', e.error);
+        this.speaking = false;
+        clearInterval(this._keepAlive);
+        onEnd?.();
+      };
+      window.speechSynthesis.speak(u);
+    };
+
+    // Fix 3: Chrome pauses TTS when tab loses focus — keepalive
+    this._keepAlive = setInterval(() => {
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+    }, 5000);
+
+    speakNext();
+  }
+
+  stop() {
+    this.speaking = false;
+    clearInterval(this._keepAlive);
+    window.speechSynthesis?.cancel();
+  }
+}
+
+const ttsManager = new TTSManager();
+
+// ─── COMPONENT ───────────────────────────────────────────────────────────────
+export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, onLogout }) {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [chatId, setChatId] = useState(null);
+  const [chatHistory, setChatHistory] = useState([]);
+  const [chatTitle, setChatTitle] = useState('New Chat');
+  const [micActive, setMicActive] = useState(false);
+  const [micError, setMicError] = useState('');
+  const [speaking, setSpeaking] = useState(null);
+  const [showEmergency, setShowEmergency] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState(null);
+  const [rateLimitWarn, setRateLimitWarn] = useState(false);
+  const [streamingIdx, setStreamingIdx] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  const bottomRef = useRef(null);
+  const inputRef = useRef(null);
+  const recognitionRef = useRef(null);
+
+  const ttsEnabled = user.preferences?.ttsEnabled ?? false;
+  const ttsAutoRead = user.preferences?.ttsAutoRead ?? false;
+  const ttsSpeed   = user.preferences?.ttsSpeed ?? 1.0;
+  const ttsGender  = user.preferences?.ttsVoiceGender ?? 'female';
+  const language   = user.preferences?.language || 'en';
+  const fontSize   = user.preferences?.fontSize || 15;
+
+  useEffect(() => { loadChatHistory(); }, []);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
+
+  const loadChatHistory = async () => {
+    try { const { data } = await api.get('/chat/history'); setChatHistory(data); } catch (e) {}
+  };
+
+  const newChat = () => {
+    ttsManager.stop(); setSpeaking(null);
+    setMessages([]); setChatId(null); setChatTitle('New Chat');
+    inputRef.current?.focus();
+  };
+
+  const loadChat = async (id, title) => {
+    try {
+      ttsManager.stop(); setSpeaking(null);
+      const { data } = await api.get(`/chat/${id}`);
+      setMessages(data.messages.map(m => ({ role: m.role === 'assistant' ? 'bot' : m.role, text: m.content })));
+      setChatId(id); setChatTitle(title);
+    } catch (e) { alert('Failed to load chat'); }
+  };
+
+  const sendMessage = async (text) => {
+    const msg = (text || input).trim();
+    if (!msg || loading) return;
+    setInput('');
+    ttsManager.stop(); setSpeaking(null);
+    setRateLimitWarn(false);
+
+    const userMsg = { role: 'user', text: msg };
+    // Capture the future bot message index BEFORE state update
+    let botMsgIndex;
+    setMessages(prev => {
+      botMsgIndex = prev.length + 1;
+      return [...prev, userMsg];
+    });
+    setLoading(true);
+
+    const history = messages.map(m => ({ role: m.role === 'bot' ? 'assistant' : m.role, content: m.text }));
+
+    try {
+      const token = localStorage.getItem('nyaybot_token');
+      const res = await fetch('http://localhost:5000/api/chat/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ message: msg, chatId, history, language }),
+      });
+
+      if (res.status === 429) {
+        setRateLimitWarn(true);
+        setMessages(prev => [...prev, { role: 'bot', text: '⚠️ Rate limit reached. Please wait a moment.' }]);
+        setLoading(false);
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setMessages(prev => [...prev, { role: 'bot', text: '❌ Error: ' + (err.message || 'Server error') }]);
+        setLoading(false);
+        return;
+      }
+
+      setMessages(prev => [...prev, { role: 'bot', text: '', streaming: true }]);
+      setStreamingIdx(messages.length + 1);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullText = '';
+      let newChatId = chatId;
+      let newTitle = chatTitle;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const parsed = JSON.parse(line.slice(6));
+            if (parsed.delta) {
+              fullText += parsed.delta;
+              setMessages(prev => {
+                const next = [...prev];
+                next[next.length - 1] = { role: 'bot', text: fullText, streaming: true };
+                return next;
+              });
+            }
+            if (parsed.done) { newChatId = parsed.chatId; newTitle = parsed.title; }
+            if (parsed.error) { fullText = '❌ ' + parsed.error; }
+          } catch (_) {}
+        }
+      }
+
+      setMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1] = { role: 'bot', text: fullText };
+        return next;
+      });
+      setStreamingIdx(null);
+      if (!chatId) { setChatId(newChatId); setChatTitle(newTitle); }
+      loadChatHistory();
+
+      // Fix 4: Use correct index for auto-read; wait for state to settle
+      if (ttsEnabled && ttsAutoRead && fullText) {
+        const readIdx = botMsgIndex;
+        setTimeout(() => {
+          ttsManager.speak(fullText, language, ttsSpeed, ttsGender,
+            () => setSpeaking(readIdx),
+            () => setSpeaking(null)
+          );
+        }, 400);
+      }
+
+    } catch (err) {
+      setMessages(prev => [...prev, { role: 'bot', text: '❌ Error: ' + err.message }]);
+      setStreamingIdx(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleKey = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } };
+
+  // ── Mic / Speech-to-Text ──────────────────────────────────────────────────
+  const toggleMic = () => {
+    setMicError('');
+    if (micActive) { recognitionRef.current?.stop(); setMicActive(false); return; }
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setMicError('Speech recognition not supported. Use Chrome or Edge.'); return; }
+
+    const isLocalhost = ['localhost','127.0.0.1'].includes(location.hostname);
+    if (location.protocol !== 'https:' && !isLocalhost) {
+      setMicError('Microphone requires HTTPS or localhost.');
+      return;
+    }
+
+    const recognition = new SR();
+    const langMap = { en:'en-IN', hi:'hi-IN', bn:'bn-IN', mr:'mr-IN', ta:'ta-IN', te:'te-IN' };
+    recognition.lang = langMap[language] || 'en-IN';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onresult = (e) => {
+      const t = e.results[0][0].transcript;
+      setInput(prev => prev ? prev + ' ' + t : t);
+      setMicActive(false);
+    };
+    recognition.onerror = (e) => {
+      setMicActive(false);
+      if (e.error === 'not-allowed') setMicError('Microphone blocked. Click the 🔒 icon in your browser address bar and allow microphone.');
+      else if (e.error === 'no-speech') setMicError('No speech detected. Speak clearly and try again.');
+      else if (e.error === 'network') setMicError('Network error with speech recognition. Check internet connection.');
+      else setMicError('Mic error: ' + e.error);
+    };
+    recognition.onend = () => setMicActive(false);
+    recognitionRef.current = recognition;
+
+    try { recognition.start(); setMicActive(true); }
+    catch (e) { setMicError('Could not start mic: ' + e.message); }
+  };
+
+  // ── TTS per-message ───────────────────────────────────────────────────────
+  const toggleTTS = (text, idx) => {
+    if (!window.speechSynthesis) {
+      alert('Text-to-speech is not supported in this browser. Please use Chrome or Edge.');
+      return;
+    }
+    if (!ttsEnabled) {
+      if (confirm('Text-to-speech is currently OFF.\nGo to Settings → Appearance to enable it?')) onOpenSettings();
+      return;
+    }
+    if (speaking === idx) { ttsManager.stop(); setSpeaking(null); return; }
+    ttsManager.speak(text, language, ttsSpeed, ttsGender,
+      () => setSpeaking(idx),
+      () => setSpeaking(null)
+    );
+  };
+
+  const copyMessage = (text, idx) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopyFeedback(idx); setTimeout(() => setCopyFeedback(null), 2000);
+    });
+  };
+
+  const bookmarkMessage = async (text, idx) => {
+    try {
+      await api.post('/auth/bookmarks', { chatId, messageIndex: idx, content: text, note: '' });
+      setCopyFeedback('bm_' + idx); setTimeout(() => setCopyFeedback(null), 2000);
+    } catch (e) {}
+  };
+
+  const getFollowUps = (text) => {
+    const t = text.toLowerCase();
+    for (const [key, chips] of Object.entries(FOLLOWUP_MAP)) {
+      if (t.includes(key)) return chips;
+    }
+    return [];
+  };
+
+  const groupedHistory = () => {
+    const today = [], yesterday = [], older = [];
+    const now = Date.now();
+    chatHistory.forEach(c => {
+      const diff = (now - new Date(c.updatedAt)) / 86400000;
+      if (diff < 1) today.push(c); else if (diff < 2) yesterday.push(c); else older.push(c);
+    });
+    return { today, yesterday, older };
+  };
+  const groups = groupedHistory();
+
+  return (
+    <div style={{ display:'flex', height:'100vh', overflow:'hidden' }}>
+
+      {/* SIDEBAR */}
+      <div style={{ width: sidebarOpen ? 260 : 0, background:'var(--card)', borderRight:'1px solid var(--border)', display:'flex', flexDirection:'column', flexShrink:0, overflow:'hidden', transition:'width .2s' }}>
+        <div style={{ padding:16, borderBottom:'1px solid var(--border)', minWidth:260 }}>
+          <div style={{ fontSize:20, fontWeight:700, color:'var(--accent)' }}>⚖️ NyayBot</div>
+          <button onClick={newChat} style={{ width:'100%', padding:10, background:'var(--accent)', color:'#fff', borderRadius:8, fontSize:14, fontWeight:500, marginTop:12, cursor:'pointer' }}>
+            + New Chat
+          </button>
+        </div>
+        <div style={{ flex:1, overflowY:'auto', padding:12, minWidth:260 }}>
+          {[['Today', groups.today], ['Yesterday', groups.yesterday], ['Older', groups.older]].map(([label, items]) =>
+            items.length > 0 && (
+              <div key={label} style={{ marginBottom:16 }}>
+                <div style={{ fontSize:11, color:'var(--text3)', fontWeight:600, textTransform:'uppercase', letterSpacing:.5, marginBottom:6, padding:'0 4px' }}>{label}</div>
+                {items.map(c => (
+                  <div key={c._id} onClick={() => loadChat(c._id, c.title)}
+                    style={{ padding:'8px 10px', borderRadius:6, fontSize:13, color: chatId===c._id ? 'var(--accent)' : 'var(--text2)', background: chatId===c._id ? 'var(--card2)' : 'transparent', cursor:'pointer', marginBottom:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', transition:'.15s' }}>
+                    💬 {c.title}
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+          {chatHistory.length === 0 && <div style={{ fontSize:13, color:'var(--text3)', padding:8 }}>No chats yet. Start a new conversation.</div>}
+        </div>
+        <div style={{ padding:14, borderTop:'1px solid var(--border)', minWidth:260 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10, padding:6 }}>
+            <div style={{ width:34, height:34, borderRadius:'50%', background:'var(--accent)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, fontWeight:700, color:'#fff', flexShrink:0, overflow:'hidden' }}>
+              {user.profilePhoto ? <img src={user.profilePhoto} alt="avatar" style={{ width:'100%', height:'100%', objectFit:'cover' }} /> : user.name?.[0]?.toUpperCase()}
+            </div>
+            <div style={{ overflow:'hidden' }}>
+              <div style={{ fontSize:13, fontWeight:500, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{user.name}</div>
+              <div style={{ fontSize:11, color:'var(--text3)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{user.email}</div>
+            </div>
+          </div>
+          <div style={{ display:'flex', gap:6, marginTop:8 }}>
+            <button onClick={onOpenSettings} style={{ flex:1, padding:'6px 10px', border:'1px solid var(--border)', borderRadius:6, fontSize:12, color:'var(--text2)' }}>⚙ Settings</button>
+            <button onClick={onLogout} style={{ padding:'6px 10px', border:'1px solid var(--border)', borderRadius:6, fontSize:12, color:'var(--text2)' }}>↩</button>
+          </div>
+        </div>
+      </div>
+
+      {/* MAIN CHAT */}
+      <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
+
+        {/* Header */}
+        <div style={{ padding:'12px 16px', borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'space-between', background:'var(--card)', gap:8 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <button onClick={() => setSidebarOpen(o => !o)} style={{ width:30, height:30, borderRadius:6, border:'1px solid var(--border)', color:'var(--text2)', fontSize:16 }}>☰</button>
+            <div style={{ fontSize:14, fontWeight:600, maxWidth:300, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{chatTitle}</div>
+          </div>
+          <div style={{ display:'flex', gap:6, alignItems:'center', flexShrink:0 }}>
+            {ttsEnabled && <div style={{ fontSize:11, color:'var(--accent)', padding:'3px 8px', border:'1px solid var(--accent)', borderRadius:12, opacity:.8 }}>🔊 TTS ON</div>}
+            <button onClick={() => setShowEmergency(e => !e)} style={{ padding:'5px 12px', border:'1px solid var(--danger)', borderRadius:20, fontSize:12, color:'var(--danger)', fontWeight:500 }}>🆘 Emergency</button>
+            <button onClick={onToggleTheme} style={{ padding:'5px 12px', border:'1px solid var(--border)', borderRadius:20, fontSize:12, color:'var(--text2)' }}>{theme === 'dark' ? '☀' : '🌙'}</button>
+          </div>
+        </div>
+
+        {/* TTS-off notice bar */}
+        {!ttsEnabled && (
+          <div style={{ background:'var(--card2)', borderBottom:'1px solid var(--border)', padding:'6px 16px', fontSize:12, color:'var(--text3)' }}>
+            🔇 Audio is <b>off</b> — enable it in{' '}
+            <span style={{ color:'var(--accent)', cursor:'pointer', textDecoration:'underline' }} onClick={onOpenSettings}>
+              Settings → Appearance → Voice (TTS)
+            </span>
+          </div>
+        )}
+
+        {/* Mic error */}
+        {micError && (
+          <div style={{ background:'rgba(224,92,92,.1)', border:'1px solid var(--danger)', borderRadius:8, margin:'8px 16px', padding:'8px 14px', fontSize:13, color:'var(--danger)', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            🎙 {micError}
+            <button onClick={() => setMicError('')} style={{ color:'var(--danger)', fontSize:16, cursor:'pointer' }}>×</button>
+          </div>
+        )}
+
+        {/* Rate limit warning */}
+        {rateLimitWarn && (
+          <div style={{ background:'rgba(224,92,92,.1)', border:'1px solid var(--danger)', borderRadius:8, margin:'8px 16px', padding:'8px 14px', fontSize:13, color:'var(--danger)', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            ⚠️ Rate limit reached — wait a moment before sending again.
+            <button onClick={() => setRateLimitWarn(false)} style={{ color:'var(--danger)', fontSize:16, cursor:'pointer' }}>×</button>
+          </div>
+        )}
+
+        {/* Emergency panel */}
+        {showEmergency && (
+          <div style={{ background:'var(--card2)', borderBottom:'1px solid var(--border)', padding:'12px 16px' }}>
+            <div style={{ fontSize:13, fontWeight:600, color:'var(--danger)', marginBottom:10 }}>🆘 Emergency Helplines (India)</div>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:8 }}>
+              {EMERGENCY.map(e => (
+                <a key={e.number} href={`tel:${e.number}`}
+                  style={{ display:'flex', alignItems:'center', gap:6, padding:'6px 12px', background:'var(--card)', border:'1px solid var(--border)', borderRadius:8, fontSize:12, color:'var(--text)', textDecoration:'none' }}>
+                  <span>{e.icon}</span>
+                  <div><div style={{ fontWeight:500 }}>{e.name}</div><div style={{ color:'var(--accent)', fontWeight:700 }}>{e.number}</div></div>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Messages */}
+        <div style={{ flex:1, overflowY:'auto', padding:'20px 16px', display:'flex', flexDirection:'column', gap:14, fontSize }}>
+          {messages.length === 0 && (
+            <>
+              <div style={{ background:'var(--bot-bubble)', borderRadius:12, padding:20, maxWidth:680 }} className="msg-appear">
+                <div style={{ fontSize:16, fontWeight:600, color:'var(--accent)', marginBottom:8 }}>नमस्ते! I am NyayBot 🙏</div>
+                <div style={{ fontSize:14, color:'var(--text2)', lineHeight:1.6 }}>
+                  I help you understand Indian laws and your legal rights. Ask me about IPC sections, RTI, consumer rights, domestic violence laws, labour law, property rights, family law, or cyber crime.
+                </div>
+              </div>
+              <div style={{ display:'flex', flexWrap:'wrap', gap:8 }}>
+                {CHIPS.map(c => (
+                  <button key={c.label} onClick={() => sendMessage(c.text)}
+                    style={{ padding:'7px 14px', background:'var(--card2)', border:'1px solid var(--border)', borderRadius:20, fontSize:13, color:'var(--text2)', cursor:'pointer' }}>
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {messages.map((m, i) => {
+            const isBot = m.role === 'bot';
+            const isSpeaking = speaking === i;
+            const followUps = isBot && !m.streaming ? getFollowUps(m.text) : [];
+            return (
+              <div key={i} className="msg-appear" style={{ display:'flex', flexDirection:'column', alignItems: isBot ? 'flex-start' : 'flex-end', gap:4 }}>
+                <div style={{
+                  maxWidth:'78%', padding:'11px 15px', borderRadius:12, lineHeight:1.65,
+                  background: isBot ? 'var(--bot-bubble)' : 'var(--user-bubble)',
+                  color: isBot ? 'var(--text)' : '#fff',
+                  borderBottomRightRadius: !isBot ? 3 : 12,
+                  borderBottomLeftRadius: isBot ? 3 : 12,
+                  whiteSpace:'pre-wrap', wordBreak:'break-word',
+                  boxShadow: isSpeaking ? '0 0 0 2px var(--accent)' : 'none',
+                  transition:'box-shadow .2s',
+                }}>
+                  {m.text}
+                  {m.streaming && <span style={{ animation:'pulse 1s infinite', marginLeft:4 }}>▋</span>}
+                </div>
+
+                {/* Bot action buttons — always shown */}
+                {isBot && !m.streaming && m.text && (
+                  <div style={{ display:'flex', gap:4, padding:'0 2px', flexWrap:'wrap' }}>
+                    <button onClick={() => copyMessage(m.text, i)} title="Copy"
+                      style={{ padding:'3px 8px', borderRadius:5, border:'1px solid var(--border)', fontSize:11, color:'var(--text3)', background:'var(--card2)', cursor:'pointer' }}>
+                      {copyFeedback === i ? '✅ Copied' : '📋 Copy'}
+                    </button>
+                    <button onClick={() => bookmarkMessage(m.text, i)} title="Bookmark"
+                      style={{ padding:'3px 8px', borderRadius:5, border:'1px solid var(--border)', fontSize:11, color:'var(--text3)', background:'var(--card2)', cursor:'pointer' }}>
+                      {copyFeedback === 'bm_'+i ? '✅ Saved' : '🔖 Save'}
+                    </button>
+                    {/* Read button — always visible; prompts to enable if TTS off */}
+                    <button onClick={() => toggleTTS(m.text, i)}
+                      title={isSpeaking ? 'Stop reading' : ttsEnabled ? 'Read aloud' : 'Enable TTS in Settings'}
+                      style={{ padding:'3px 8px', borderRadius:5, border:`1px solid ${isSpeaking ? 'var(--accent)' : 'var(--border)'}`, fontSize:11, color: isSpeaking ? 'var(--accent)' : 'var(--text3)', background:'var(--card2)', cursor:'pointer', fontWeight: isSpeaking ? 600 : 400 }}>
+                      {isSpeaking ? '⏹ Stop' : '🔊 Read'}
+                    </button>
+                    <div style={{ fontSize:11, color:'var(--text3)', padding:'3px 4px', alignSelf:'center' }}>General info — not legal advice</div>
+                  </div>
+                )}
+
+                {/* Follow-up chips */}
+                {followUps.length > 0 && i === messages.length - 1 && (
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginTop:4 }}>
+                    {followUps.map(f => (
+                      <button key={f} onClick={() => sendMessage(f)}
+                        style={{ padding:'5px 12px', background:'var(--card2)', border:'1px solid var(--border)', borderRadius:16, fontSize:12, color:'var(--text2)', cursor:'pointer' }}>
+                        {f}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {loading && streamingIdx === null && (
+            <div style={{ display:'flex', alignItems:'flex-start' }}>
+              <div style={{ display:'flex', gap:5, alignItems:'center', padding:'11px 15px', background:'var(--bot-bubble)', borderRadius:12 }}>
+                {[0,1,2].map(i => (
+                  <div key={i} style={{ width:7, height:7, borderRadius:'50%', background:'var(--text3)', animation:'bounce .8s infinite', animationDelay:`${i*.15}s` }} />
+                ))}
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+
+        {/* Input */}
+        <div style={{ padding:'14px 16px', borderTop:'1px solid var(--border)', background:'var(--card)' }}>
+          <div style={{ display:'flex', alignItems:'flex-end', gap:8, background:'var(--card2)', border:'1px solid var(--border)', borderRadius:12, padding:'10px 12px' }}>
+            <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKey}
+              placeholder="Ask about any Indian law, right, or legal procedure..."
+              rows={1} style={{ flex:1, background:'none', border:'none', color:'var(--text)', fontSize:14, resize:'none', outline:'none', maxHeight:120, lineHeight:1.5 }}
+              onInput={e => { e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,120)+'px'; }}
+            />
+            <button onClick={toggleMic} title={micActive ? 'Stop recording' : 'Voice input (Speech to Text)'}
+              style={{ width:32, height:32, borderRadius:7, border:`1px solid ${micActive?'var(--danger)':'var(--border)'}`, color: micActive?'var(--danger)':'var(--text2)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, fontSize:15, background: micActive ? 'rgba(224,92,92,.1)' : 'none', cursor:'pointer' }}>
+              {micActive ? '⏹' : '🎙'}
+            </button>
+            <button onClick={() => sendMessage()} disabled={!input.trim() || loading}
+              style={{ width:32, height:32, borderRadius:7, background:'var(--accent)', color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, opacity: (!input.trim()||loading) ? .4 : 1, fontSize:14, cursor:'pointer' }}>
+              ➤
+            </button>
+          </div>
+          <div style={{ fontSize:11, color:'var(--text3)', textAlign:'center', marginTop:6 }}>
+            NyayBot provides general legal information only — consult a lawyer for your situation
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
