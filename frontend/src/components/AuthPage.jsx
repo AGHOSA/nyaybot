@@ -45,7 +45,7 @@ export default function AuthPage({ onLogin }) {
         ? { email: form.email, password: form.password }
         : { name: form.name, email: form.email, password: form.password };
       const { data } = await api.post(endpoint, payload);
-      localStorage.setItem('nyaybot_token', data.token);
+      localStorage.setItem('token', data.token);
       localStorage.setItem('nyaybot_user', JSON.stringify(data));
       onLogin(data);
     } catch (e) {
