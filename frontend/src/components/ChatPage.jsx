@@ -261,7 +261,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
     const history = messages.map(m => ({ role: m.role === 'bot' ? 'assistant' : m.role, content: m.text }));
 
     try {
-      const token = localStorage.getItem('nyaybot_token');
+      const token = localStorage.getItem('token');
       const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chat/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -357,7 +357,7 @@ export default function ChatPage({ user, theme, onToggleTheme, onOpenSettings, o
       formData.append('language', language);
       if (chatId) formData.append('chatId', chatId);
 
-      const token = localStorage.getItem('nyaybot_token');
+      const token = localStorage.getItem('token');
       const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/chat/analyze-document`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
