@@ -9,7 +9,7 @@ export default function App() {
   const [theme, setTheme] = useState('dark');
 
   useEffect(() => {
-    const token = localStorage.getItem('nyaybot_token');
+    const token = localStorage.getItem('token');
     const savedUser = localStorage.getItem('nyaybot_user');
     if (token && savedUser) {
       const u = JSON.parse(savedUser);
@@ -30,7 +30,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('nyaybot_token');
+    localStorage.removeItem('token');
     localStorage.removeItem('nyaybot_user');
     setUser(null);
     setPage('auth');
